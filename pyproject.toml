@@ -1,0 +1,15 @@
+[project]
+name = "salsicha-launcher"
+version = "0.1.0"
+description = "Salsicha Launcher — launcher Minecraft com login Microsoft e modo offline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcstatus>=14.2.0",
+  "minecraft-launcher-lib>=8.0",
+  "PySide6>=6.6",
+  "requests>=2.31",
+]
+
+[tool.uv]
+package = false

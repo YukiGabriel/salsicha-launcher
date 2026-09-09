@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Salsicha Launcher
+Comment=Launcher Minecraft com login Microsoft e offline
+Exec=/home/yukigabriel/.local/bin/salsicha-launcher
+Icon=/home/yukigabriel/Projects/salsicha-launcher/salsicha/assets/icon.svg
+Terminal=false
+Type=Application
+Categories=Game;
+StartupWMClass=Salsicha Launcher
