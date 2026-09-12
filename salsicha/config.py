@@ -9,6 +9,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULTS = {
     "ram_gb": 4,
+    "gpu": "auto",
     "snapshots": False,
     "close_on_launch": True,
     "mods": {"sodium": True, "lithium": True, "fabric-api": True,
@@ -16,7 +17,7 @@ DEFAULTS = {
     "installations": [],
     "last_installation": "",
     "nick": "",
-    "mode": "Offline",
+    "mode": "Conta Local",
     "ms_client_id": "",
     "ms_redirect": "http://localhost:8000",
 }

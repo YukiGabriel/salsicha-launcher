@@ -25,13 +25,25 @@ from .auth import (
     extract_code_from_url, save_account, load_accounts, microsoft_options,
     refresh_login, validate_profile, device_start, device_poll, device_complete,
     device_refresh_login, DevicePending, DeviceDeclined, DeviceExpired, XboxError,
+    load_local_accounts, save_local_account, remove_local_account,
 )
+
+LOCAL_MODE = "Conta Local"
+MS_MODE = "Microsoft"
+
+
+def normalize_mode(mode: str) -> str:
+    """Migra o antigo 'Offline' para 'Conta Local'. Microsoft segue igual."""
+    m = (mode or "").strip()
+    if m == MS_MODE:
+        return MS_MODE
+    return LOCAL_MODE
 from .installer import (
     list_versions, latest_release, install_with_loader, launch,
     list_loaders, loader_versions,
 )
 from .java_utils import find_java, java_version, get_minecraft_dir
-from .modrinth import PERF_MODS, ensure_mods, latest_compat_file, download_url_to, check_mod_updates
+from .modrinth import PERF_MODS, FORGE_PERF_MODS, perf_mods_for, ensure_mods, latest_compat_file, download_url_to, check_mod_updates, compat_status
 from .servers import DEFAULT_SERVERS, all_servers, add_custom, remove_custom, ping as ping_server
 from .social import list_shots, shots_dir, fetch_avatar
 from .discover import (
@@ -286,7 +298,7 @@ class MainWindow(QMainWindow):
         self.user.editingFinished.connect(lambda: self._refresh_avatar())
         row1.addWidget(self.user, 3)
         self.mode = QComboBox()
-        self.mode.addItems(["Offline", "Microsoft"])
+        self.mode.addItems([LOCAL_MODE, MS_MODE])
         self.mode.currentTextChanged.connect(self._refresh_play_buttons)
         self.mode.currentTextChanged.connect(lambda _: self._refresh_account_labels())
         self.mode.currentTextChanged.connect(lambda _: self._save_identity())
@@ -421,6 +433,28 @@ class MainWindow(QMainWindow):
         row_n.addWidget(self.e_name, 1)
         f2.addLayout(row_n)
 
+        row_i = QHBoxLayout()
+        row_i.addWidget(QLabel("Ícone:"))
+        self.e_icon = QLabel()
+        self.e_icon.setFixedSize(40, 40)
+        self.e_icon.setScaledContents(True)
+        row_i.addWidget(self.e_icon)
+        self.b_icon_pick = QPushButton("🖼 Escolher…")
+        self.b_icon_pick.clicked.connect(self._pick_inst_icon)
+        row_i.addWidget(self.b_icon_pick)
+        self.b_block_pick = QPushButton("⛏ Blocos…")
+        self.b_block_pick.setToolTip("Ícones de blocos do Minecraft")
+        self.b_block_pick.clicked.connect(self._pick_block_icon)
+        row_i.addWidget(self.b_block_pick)
+        self.b_icon_clear = QPushButton("✕")
+        self.b_icon_clear.setToolTip("Tirar o ícone")
+        self.b_icon_clear.setFixedWidth(36)
+        self.b_icon_clear.clicked.connect(self._clear_inst_icon)
+        row_i.addWidget(self.b_icon_clear)
+        row_i.addStretch(1)
+        f2.addLayout(row_i)
+        self._editing_icon: str = ""
+
         row_v = QHBoxLayout()
         row_v.addWidget(QLabel("MC:"))
         self.version = QComboBox()
@@ -442,21 +476,28 @@ class MainWindow(QMainWindow):
         row_v.addWidget(self.loader_ver, 1)
         f2.addLayout(row_v)
 
-        mods_lbl = QLabel("Mods de FPS (só valem p/ Fabric/Quilt):")
-        mods_lbl.setProperty("class", "muted")
-        f2.addWidget(mods_lbl)
+        self.e_mods_lbl = QLabel("Mods de FPS (só os compatíveis ficam ativos):")
+        self.e_mods_lbl.setProperty("class", "muted")
+        f2.addWidget(self.e_mods_lbl)
         self.e_mod_checks: dict = {}
+        self._mod_tips: dict = {}
         er1 = QHBoxLayout()
         er2 = QHBoxLayout()
-        for i, (slug, (pretty, _desc)) in enumerate(PERF_MODS.items()):
+        er3 = QHBoxLayout()
+        _all_perf = list(PERF_MODS.items()) + [(s, v) for s, v in FORGE_PERF_MODS.items()]
+        for i, (slug, (pretty, _desc)) in enumerate(_all_perf):
             cb = QCheckBox(pretty)
-            cb.setToolTip(_desc)
+            tip = _desc + (" (Forge)" if slug in FORGE_PERF_MODS else "")
+            cb.setToolTip(tip)
+            self._mod_tips[slug] = tip
             self.e_mod_checks[slug] = cb
-            (er1 if i < 3 else er2).addWidget(cb)
+            (er1 if i < 4 else (er2 if i < 7 else er3)).addWidget(cb)
         er1.addStretch(1)
         er2.addStretch(1)
+        er3.addStretch(1)
         f2.addLayout(er1)
         f2.addLayout(er2)
+        f2.addLayout(er3)
 
         row_s = QHBoxLayout()
         row_s.addWidget(QLabel("Servidor:"))
@@ -518,9 +559,10 @@ class MainWindow(QMainWindow):
         self.store_type.setMinimumWidth(150)
         row.addWidget(self.store_type)
         self.store_mc = QComboBox()
-        self.store_mc.setEnabled(False)
+        self.store_mc.setEnabled(True)
+        self.store_mc.setEditable(True)
         self.store_mc.setMinimumWidth(110)
-        self.store_mc.setToolTip("Segue a versão escolhida em ▶ Jogar")
+        self.store_mc.setToolTip("Escolha a versão do Minecraft p/ filtrar a busca")
         self.store_mc.addItem("todas", "")
         row.addWidget(self.store_mc, 1)
         self.mp_search = QLineEdit()
@@ -825,6 +867,32 @@ class MainWindow(QMainWindow):
         f.addLayout(row)
         l.addWidget(g)
 
+        g0 = QGroupBox("🟡 Contas locais (sem Microsoft — joga na hora)")
+        f0 = QVBoxLayout(g0)
+        self.local_list = QListWidget()
+        self.local_list.setMaximumHeight(110)
+        self.local_list.itemDoubleClicked.connect(lambda _i: self._local_use())
+        f0.addWidget(self.local_list)
+        row0 = QHBoxLayout()
+        self.local_nick = QLineEdit()
+        self.local_nick.setPlaceholderText("Nick local (3–16 letras)")
+        self.local_nick.setMaxLength(16)
+        self.local_nick.returnPressed.connect(self._local_add)
+        row0.addWidget(self.local_nick, 2)
+        self.b_local_add = QPushButton("＋ Criar")
+        self.b_local_add.clicked.connect(self._local_add)
+        row0.addWidget(self.b_local_add)
+        f0.addLayout(row0)
+        row0b = QHBoxLayout()
+        self.b_local_use = QPushButton("Usar selecionada")
+        self.b_local_use.clicked.connect(self._local_use)
+        row0b.addWidget(self.b_local_use)
+        self.b_local_del = QPushButton("🗑 Apagar")
+        self.b_local_del.clicked.connect(self._local_del)
+        row0b.addWidget(self.b_local_del)
+        f0.addLayout(row0b)
+        l.addWidget(g0)
+
         g2 = QGroupBox("🟢 Entrar com Microsoft (fácil)")
         f2 = QVBoxLayout(g2)
         trust = QLabel(
@@ -1126,17 +1194,22 @@ class MainWindow(QMainWindow):
         self.mod_checks: dict = {}
         r1 = QHBoxLayout()
         r2 = QHBoxLayout()
-        for i, (slug, (pretty, _desc)) in enumerate(PERF_MODS.items()):
+        r3 = QHBoxLayout()
+        _all = list(PERF_MODS.items()) + [(s, v) for s, v in FORGE_PERF_MODS.items()]
+        _defs = ("sodium", "lithium", "fabric-api", "foamfix", "vanillafix", "texfix", "surge", "clumps")
+        for i, (slug, (pretty, _desc)) in enumerate(_all):
             cb = QCheckBox(pretty)
-            cb.setChecked(bool(_sel.get(slug, slug in ("sodium", "lithium", "fabric-api"))))
-            cb.setToolTip(_desc)
+            cb.setChecked(bool(_sel.get(slug, slug in _defs)))
+            cb.setToolTip(_desc + (" (Forge)" if slug in FORGE_PERF_MODS else ""))
             cb.toggled.connect(lambda _v: self._save_mods())
             self.mod_checks[slug] = cb
-            (r1 if i < 3 else r2).addWidget(cb)
+            (r1 if i < 4 else (r2 if i < 7 else r3)).addWidget(cb)
         r1.addStretch(1)
         r2.addStretch(1)
+        r3.addStretch(1)
         f2.addLayout(r1)
         f2.addLayout(r2)
+        f2.addLayout(r3)
         l.addWidget(g2)
 
         jv = find_java()
@@ -1157,6 +1230,20 @@ class MainWindow(QMainWindow):
         jlabel.setProperty("class", "muted")
         jlabel.setWordWrap(True)
         l.addWidget(jlabel)
+
+        try:
+            _has_nv = self._dedicated_gpu_available()
+        except Exception:
+            _has_nv = False
+        if _has_nv:
+            self.gpu_check = QCheckBox("🎮 Usar placa NVIDIA (prime-run) — recomendado neste PC")
+            try:
+                self.gpu_check.setChecked((load_cfg().get("gpu", "auto") or "auto") != "integrada")
+            except Exception:
+                self.gpu_check.setChecked(True)
+            self.gpu_check.toggled.connect(
+                lambda v: self._save_simple("gpu", "auto" if v else "integrada"))
+            l.addWidget(self.gpu_check)
 
         g4 = QGroupBox("💾 Mundos e registros")
         f4 = QVBoxLayout(g4)
@@ -1272,7 +1359,7 @@ class MainWindow(QMainWindow):
 
     # ---------- rótulos ----------
     def _refresh_play_buttons(self, mode: str):
-        is_ms = (mode == "Microsoft")
+        is_ms = (normalize_mode(mode) == MS_MODE)
         try:
             self.b_play.setText("▶ JOGAR com Microsoft" if is_ms else "▶ JOGAR")
         except Exception:
@@ -1355,8 +1442,8 @@ class MainWindow(QMainWindow):
             nick.setMaxLength(16)
             f1.addWidget(nick)
             mode = QComboBox()
-            mode.addItems(["Offline", "Microsoft"])
-            f1.addWidget(QLabel("Contas Microsoft entram depois, em 👤 Contas."))
+            mode.addItems([LOCAL_MODE, MS_MODE])
+            f1.addWidget(QLabel("Conta Local joga na hora, sem Microsoft. A Microsoft é opcional, em 👤 Contas."))
             f1.addWidget(mode)
             stack.addWidget(w1)
 
@@ -1435,11 +1522,15 @@ class MainWindow(QMainWindow):
                 self._set_installations([data], data["id"])
                 cfg2 = load_cfg()
                 cfg2["nick"] = name
-                cfg2["mode"] = mode.currentText()
+                cfg2["mode"] = normalize_mode(mode.currentText())
                 save_cfg(cfg2)
+                try:
+                    save_local_account(name)
+                except Exception:
+                    pass
                 self.user.setText(name)
-                self.mode.setCurrentText(mode.currentText())
-                self._refresh_play_buttons(mode.currentText())
+                self.mode.setCurrentText(normalize_mode(mode.currentText()))
+                self._refresh_play_buttons(normalize_mode(mode.currentText()))
                 self._refresh_inst_combo()
                 self._refresh_inst_list()
                 self._refresh_avatar()
@@ -1467,13 +1558,23 @@ class MainWindow(QMainWindow):
             cfg["last_installation"] = last_id
         save_cfg(cfg)
 
-    def _default_mods(self) -> dict:
+    def _default_mods(self, loader: str = "") -> dict:
         try:
             sel = (load_cfg().get("mods") or {})
-            return {slug: bool(sel.get(slug, slug in ("sodium", "lithium", "fabric-api")))
-                    for slug in PERF_MODS}
         except Exception:
-            return {slug: slug in ("sodium", "lithium", "fabric-api") for slug in PERF_MODS}
+            sel = {}
+        try:
+            pack = perf_mods_for(loader) if loader else None
+            slugs = list(pack.keys()) if pack else list(PERF_MODS.keys()) + list(FORGE_PERF_MODS.keys())
+        except Exception:
+            slugs = list(PERF_MODS.keys())
+        out: dict = {}
+        for slug in slugs:
+            if slug in sel:
+                out[slug] = bool(sel[slug])
+            else:
+                out[slug] = slug in ("sodium", "lithium", "fabric-api", "foamfix", "vanillafix", "texfix", "surge", "clumps")
+        return out
 
     def _maybe_seed_defaults(self, latest: str):
         if self._get_installations() or not latest:
@@ -1500,7 +1601,11 @@ class MainWindow(QMainWindow):
             self.installation.blockSignals(True)
             self.installation.clear()
             for i in insts:
-                self.installation.addItem(i.get("name", "?"), i.get("id"))
+                ic = self._inst_icon(i)
+                if ic is not None:
+                    self.installation.addItem(ic, i.get("name", "?"), i.get("id"))
+                else:
+                    self.installation.addItem(i.get("name", "?"), i.get("id"))
             self.installation.blockSignals(False)
             if insts:
                 idx = next((n for n, i in enumerate(insts) if i.get("id") == last), 0)
@@ -1516,7 +1621,14 @@ class MainWindow(QMainWindow):
             self.inst_list.clear()
             for i in self._get_installations():
                 tag = "📦 " if i.get("type") == "modpack" else ""
-                QListWidgetItem(tag + i.get("name", "?"), self.inst_list)
+                it = QListWidgetItem(tag + i.get("name", "?"))
+                try:
+                    ic = self._inst_icon(i)
+                    if ic is not None:
+                        it.setIcon(ic)
+                except Exception:
+                    pass
+                self.inst_list.addItem(it)
             self.inst_list.blockSignals(False)
             if cur:
                 for n, i in enumerate(self._get_installations()):
@@ -1549,7 +1661,11 @@ class MainWindow(QMainWindow):
                 base = f"{i.get('mc', '?')} • puro (vanilla)"
             else:
                 lv = i.get("loader_ver") or "latest"
-                nmods = sum(1 for v in (i.get("mods") or {}).values() if v)
+                try:
+                    _pack = perf_mods_for(i.get("loader", "vanilla") or "vanilla")
+                    nmods = sum(1 for k, v in ((i.get("mods") or {}).items()) if v and k in _pack)
+                except Exception:
+                    nmods = sum(1 for v in (i.get("mods") or {}).values() if v)
                 base = f"{i.get('mc', '?')} • {i.get('loader')} {lv} • {nmods} mods FPS"
             if i.get("server") and i.get("direct"):
                 base += f" → {i['server']}"
@@ -1575,13 +1691,20 @@ class MainWindow(QMainWindow):
             i = insts[row]
             self._editing_id = i.get("id")
             self.e_name.setText(i.get("name", ""))
+            self._editing_icon = i.get("icon", "") or ""
+            self._preview_inst_icon()
             if i.get("mc"):
                 self.version.setCurrentText(i["mc"])
             self.loader.setCurrentText(i.get("loader", "vanilla") or "vanilla")
             self.loader_ver.setCurrentText(i.get("loader_ver", "") or "")
-            mods = i.get("mods") or self._default_mods()
+            mods = i.get("mods") or self._default_mods(i.get("loader", ""))
+            _forge_defs = ("foamfix", "vanillafix", "texfix", "surge", "clumps")
             for slug, cb in self.e_mod_checks.items():
-                cb.setChecked(bool(mods.get(slug, False)))
+                if slug in mods:
+                    cb.setChecked(bool(mods[slug]))
+                else:
+                    # Save antigo de Forge sem as chaves novas: liga o pack Forge por padrão.
+                    cb.setChecked(slug in _forge_defs if (i.get("loader") == "forge") else False)
             srv = i.get("server", "") or ""
             idx = self.e_server.findData(srv)
             self.e_server.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1590,15 +1713,139 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _pick_inst_icon(self):
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            p, _ = QFileDialog.getOpenFileName(
+                self, "Ícone da versão", str(Path.home()),
+                "Imagens (*.png *.jpg *.jpeg *.svg *.ico *.bmp)")
+            if p:
+                self._editing_icon = p
+                self._preview_inst_icon()
+        except Exception:
+            pass
+
+    def _clear_inst_icon(self):
+        self._editing_icon = ""
+        try:
+            self.e_icon.clear()
+        except Exception:
+            pass
+
+    def _preview_inst_icon(self):
+        try:
+            from PySide6.QtGui import QPixmap
+            pm = QPixmap(self._editing_icon or "")
+            if not pm.isNull():
+                self.e_icon.setPixmap(pm)
+            else:
+                self.e_icon.clear()
+        except Exception:
+            pass
+
+    def _pick_block_icon(self):
+        """Galeria de blocos do Minecraft como ícone da versão."""
+        try:
+            from .block_icons import BLOCKS, ensure_block_icons
+            paths = ensure_block_icons()
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, f"Não extraí os blocos: {e}")
+            return
+        if not paths:
+            QMessageBox.information(
+                self, APP_NAME,
+                "Ainda não há arquivos do Minecraft aqui.\nJogue uma vez e volte — eu tiro os ícones do jogo.")
+            return
+        try:
+            from PySide6.QtWidgets import QDialog, QDialogButtonBox
+            from PySide6.QtGui import QIcon
+            dlg = QDialog(self)
+            dlg.setWindowTitle("⛏ Bloco de ícone")
+            dlg.resize(460, 380)
+            lay = QVBoxLayout(dlg)
+            grid = QListWidget()
+            grid.setIconSize(QSize(48, 48))
+            grid.setSpacing(4)
+            grid.setViewMode(QListWidget.IconMode)
+            grid.setResizeMode(QListWidget.Adjust)
+            grid.setMovement(QListWidget.Static)
+            grid.itemDoubleClicked.connect(lambda _i: dlg.accept())
+            for bid, pretty, _c in BLOCKS:
+                p = paths.get(bid)
+                if not p:
+                    continue
+                try:
+                    it = QListWidgetItem(QIcon(str(p)), pretty)
+                except Exception:
+                    it = QListWidgetItem(pretty)
+                it.setData(Qt.UserRole, str(p))
+                grid.addItem(it)
+            lay.addWidget(grid, 1)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            lay.addWidget(btns)
+            if dlg.exec() and grid.currentItem() and grid.currentItem().data(Qt.UserRole):
+                self._editing_icon = grid.currentItem().data(Qt.UserRole)
+                self._preview_inst_icon()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _inst_icon(inst) -> object:
+        """QIcon do ícone guardado, ou None."""
+        try:
+            from PySide6.QtGui import QIcon
+            p = (inst or {}).get("icon", "") if isinstance(inst, dict) else ""
+            if p and Path(p).exists():
+                return QIcon(p)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _store_inst_icon(inst_id: str, src: str) -> str:
+        """Copia o ícone p/ dentro do launcher (não quebra se o original sumir)."""
+        try:
+            base = Path.home() / ".salsicha-launcher" / "icons" / "versions"
+            base.mkdir(parents=True, exist_ok=True)
+            for old in base.glob(f"{inst_id}.*"):
+                try:
+                    if not src or Path(src).resolve() != old.resolve():
+                        old.unlink()
+                except Exception:
+                    pass
+            if not src:
+                return ""
+            s = Path(src)
+            if not s.exists():
+                return ""
+            ext = s.suffix.lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".svg", ".ico", ".bmp"):
+                ext = ".png"
+            dst = base / f"{inst_id}{ext}"
+            if s.resolve() != dst.resolve():
+                import shutil as _sh
+                _sh.copy2(s, dst)
+                return str(dst)
+            return str(s)
+        except Exception:
+            return src or ""
+
     def _new_installation(self):
         try:
             self._editing_id = None
+            self._editing_icon = ""
+            try:
+                self.e_icon.clear()
+            except Exception:
+                pass
             self.e_name.setText("")
             self.e_name.setPlaceholderText("Ex.: Hypixel 1.8.9")
             self.e_name.setFocus()
             self.loader.setCurrentText("vanilla")
             for slug, cb in self.e_mod_checks.items():
-                cb.setChecked(slug in ("sodium", "lithium", "fabric-api"))
+                cb.setChecked(slug in ("sodium", "lithium", "fabric-api", "foamfix", "vanillafix", "texfix", "surge", "clumps"))
             self.e_server.setCurrentIndex(0)
             self.e_direct.setChecked(False)
             self.inst_list.clearSelection()
@@ -1621,11 +1868,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, APP_NAME, "A lista do Minecraft ainda está carregando. Aguarde.")
                 return
             insts = self._get_installations()
+            iid = self._editing_id or f"v-{int(_t.time())}"
             data = {
-                "id": self._editing_id or f"v-{int(_t.time())}",
+                "id": iid,
                 "type": "standard",
                 "name": name,
                 "mc": mc,
+                "icon": self._store_inst_icon(iid, (self._editing_icon or "").strip()),
                 "loader": self.loader.currentText() or "vanilla",
                 "loader_ver": self.loader_ver.currentText().strip(),
                 "mods": {s: cb.isChecked() for s, cb in self.e_mod_checks.items()},
@@ -1634,7 +1883,16 @@ class MainWindow(QMainWindow):
             }
             for n, i in enumerate(insts):
                 if i.get("id") == data["id"]:
-                    insts[n] = data
+                    if i.get("type") == "modpack":
+                        # Modpack não vira versão normal: preserva o pack,
+                        # atualiza só nome, ícone e servidor.
+                        i["name"] = data["name"]
+                        i["icon"] = data.get("icon", i.get("icon", ""))
+                        i["server"] = data.get("server", "")
+                        i["direct"] = data.get("direct", False)
+                        data = i
+                    else:
+                        insts[n] = data
                     break
             else:
                 insts.append(data)
@@ -1750,27 +2008,40 @@ class MainWindow(QMainWindow):
             pass
 
     def _play_current(self):
-        if self.mode.currentText() == "Microsoft":
+        if normalize_mode(self.mode.currentText()) == MS_MODE:
             self._play_microsoft()
         else:
-            self._play_offline()
+            self._play_local()
 
     def _prefill_account(self):
         try:
             cfg = load_cfg()
             nick = (cfg.get("nick") or "").strip()
-            mode = cfg.get("mode") or "Offline"
+            mode = normalize_mode(cfg.get("mode") or "")
             if nick:
                 self.user.blockSignals(True)
                 self.user.setText(nick)
                 self.user.blockSignals(False)
-                self.mode.setCurrentText(mode if mode in ("Offline", "Microsoft") else "Offline")
+                self.mode.setCurrentText(mode)
+                if mode == LOCAL_MODE:
+                    try:
+                        save_local_account(nick)
+                    except Exception:
+                        pass
             else:
-                accs = load_accounts()
-                if accs:
-                    last = list(accs.keys())[-1]
+                locals_ = load_local_accounts()
+                if locals_:
+                    last = list(locals_.keys())[-1]
                     self.user.setText(last)
-                    self.mode.setCurrentText("Microsoft")
+                    self.mode.setCurrentText(LOCAL_MODE)
+                else:
+                    accs = load_accounts()
+                    if accs:
+                        last = list(accs.keys())[-1]
+                        self.user.setText(last)
+                        self.mode.setCurrentText(MS_MODE)
+                    else:
+                        self.mode.setCurrentText(LOCAL_MODE)
             self._refresh_play_buttons(self.mode.currentText())
         except Exception:
             pass
@@ -1780,7 +2051,7 @@ class MainWindow(QMainWindow):
         try:
             cfg = load_cfg()
             cfg["nick"] = self.user.text().strip()
-            cfg["mode"] = self.mode.currentText()
+            cfg["mode"] = normalize_mode(self.mode.currentText())
             save_cfg(cfg)
         except Exception:
             pass
@@ -1792,6 +2063,41 @@ class MainWindow(QMainWindow):
             save_cfg(cfg)
         except Exception:
             pass
+
+    @staticmethod
+    def _dedicated_gpu_available() -> bool:
+        """True se há NVIDIA com offload (prime-run ou nvidia-smi)."""
+        try:
+            import shutil as _sh
+            if _sh.which("prime-run") or _sh.which("nvidia-smi"):
+                return True
+        except Exception:
+            pass
+        try:
+            from pathlib import Path as _P
+            if list(_P("/dev").glob("nvidia*")):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _gpu_env_extra() -> dict:
+        """Offload p/ NVIDIA quando ativado em ⚙️ Config (padrão: auto)."""
+        try:
+            if (load_cfg().get("gpu", "auto") or "auto") == "integrada":
+                return {}
+        except Exception:
+            pass
+        try:
+            import shutil as _sh
+            if _sh.which("nvidia-smi") or _sh.which("prime-run"):
+                return {"__NV_PRIME_RENDER_OFFLOAD": "1",
+                        "__GLX_VENDOR_LIBRARY_NAME": "nvidia",
+                        "__VK_LAYER_NV_optimus": "NVIDIA_only"}
+        except Exception:
+            pass
+        return {}
 
     def _snapshots_toggled(self, checked: bool):
         self._save_simple("snapshots", bool(checked))
@@ -1814,6 +2120,10 @@ class MainWindow(QMainWindow):
                 QListWidgetItem(name, self.saved_list)
         except Exception:
             pass
+        try:
+            self._refresh_local_accounts()
+        except Exception:
+            pass
 
     def _use_saved(self):
         try:
@@ -1822,10 +2132,65 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, "Escolha uma conta na lista.")
                 return
             self.user.setText(it.text())
-            self.mode.setCurrentText("Microsoft")
-            self._refresh_play_buttons("Microsoft")
+            self.mode.setCurrentText(MS_MODE)
+            self._refresh_play_buttons(MS_MODE)
             self._refresh_avatar()
             self.pages.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    # ---------- contas locais ----------
+    def _refresh_local_accounts(self):
+        try:
+            self.local_list.clear()
+            for name in load_local_accounts().keys():
+                QListWidgetItem(name, self.local_list)
+        except Exception:
+            pass
+
+    def _local_add(self):
+        try:
+            nick = self.local_nick.text().strip() or self.user.text().strip()
+            if not (3 <= len(nick) <= 16):
+                QMessageBox.warning(self, APP_NAME, "Nick com 3–16 letras, senhor.")
+                return
+            save_local_account(nick)
+            self.local_nick.clear()
+            self.user.setText(nick)
+            self.mode.setCurrentText(LOCAL_MODE)
+            self._refresh_play_buttons(LOCAL_MODE)
+            self._refresh_local_accounts()
+            self._refresh_avatar()
+            self.signals.status.emit(f"conta local {nick} pronta ✓")
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, f"Não criei: {e}")
+
+    def _local_use(self):
+        try:
+            it = self.local_list.currentItem()
+            if not it:
+                QMessageBox.information(self, APP_NAME, "Escolha uma conta local.")
+                return
+            self.user.setText(it.text())
+            self.mode.setCurrentText(LOCAL_MODE)
+            self._refresh_play_buttons(LOCAL_MODE)
+            self._refresh_avatar()
+            self.pages.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    def _local_del(self):
+        try:
+            it = self.local_list.currentItem()
+            if not it:
+                QMessageBox.information(self, APP_NAME, "Escolha uma conta local.")
+                return
+            name = it.text()
+            if QMessageBox.question(self, APP_NAME, f"Apagar conta local {name}?",
+                                    QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+            remove_local_account(name)
+            self._refresh_local_accounts()
         except Exception:
             pass
 
@@ -1836,6 +2201,9 @@ class MainWindow(QMainWindow):
             return
         if msg.startswith("__LOADERS__:"):
             self._apply_loaders_from_log(msg)
+            return
+        if msg.startswith("__MODSUP__:"):
+            self._apply_modsup_from_log(msg)
             return
         if msg.startswith("__SERVER_STATUS__:"):
             try:
@@ -1944,12 +2312,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
-        if msg.startswith("__MODPACKS__:"):
+        if msg.startswith("__MODPACKS__:") or msg == "__MP_SEARCH_DONE__":
             self._apply_modpacks_from_log(msg)
             return
         if msg.startswith("__MODPACK_DONE__:"):
             try:
-                _, slug, ver = msg.split("__MODPACK_DONE__:", 1)[1].split(":", 2)
+                parts = msg.split("__MODPACK_DONE__:", 1)[1].split(":", 1)
+                if len(parts) != 2:
+                    return
+                slug, ver = parts
             except ValueError:
                 return
             try:
@@ -2035,6 +2406,11 @@ class MainWindow(QMainWindow):
                 self.loader_ver.clear()
             except Exception:
                 pass
+            try:  # versão pura: nenhum mod se aplica
+                self._apply_modsupport(loader or "vanilla", mc,
+                                       {s: "0" for s in self.e_mod_checks})
+            except Exception:
+                pass
             return
 
         def work(loader=loader, mc=mc):
@@ -2048,7 +2424,76 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.signals.log.emit(f"ℹ {loader} sem suporte para {mc}.")
                 self.signals.log.emit(f"__LOADERS__:{loader}:{mc}:")
+            try:  # compatibilidade dos mods de FPS com (mc, loader)
+                try:
+                    slugs = list(self.e_mod_checks.keys())
+                except Exception:
+                    slugs = []
+                if slugs:
+                    self.signals.log.emit(f"__MODSUP__:{loader}:{mc}:" + ",".join(
+                        f"{s}={self._modsup_one(s, mc, loader)}" for s in slugs))
+            except Exception:
+                pass
         threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _modsup_one(slug: str, mc: str, loader: str) -> str:
+        """'1' compatível, '0' incompatível, '?' offline."""
+        try:
+            lds = [loader]
+            if slug == "fabric-api" and loader in ("fabric", "quilt"):
+                lds = ["fabric", "quilt"]
+            r = compat_status(slug, mc, lds)
+            return "1" if r is True else ("0" if r is False else "?")
+        except Exception:
+            return "?"
+
+    def _apply_modsupport(self, loader: str, mc: str, d: dict):
+        """Apaga (desativa) os mods sem build p/ (mc, loader)."""
+        try:
+            n_ok = 0
+            for slug, cb in self.e_mod_checks.items():
+                v = d.get(slug, "?")
+                if v == "1":
+                    n_ok += 1
+                    cb.setEnabled(True)
+                    try:
+                        cb.setToolTip(self._mod_tips.get(slug, ""))
+                    except Exception:
+                        pass
+                elif v == "0":
+                    cb.setEnabled(False)
+                    if cb.isChecked():
+                        cb.setChecked(False)
+                    why = "versão pura (sem loader)" if loader == "vanilla" else f"sem build para {mc} {loader}"
+                    cb.setToolTip(f"Indisponível — {why}.")
+                else:
+                    cb.setEnabled(True)
+                    try:
+                        cb.setToolTip((self._mod_tips.get(slug, "") + " (não verificado — offline?)").strip())
+                    except Exception:
+                        pass
+                    n_ok += 1
+            try:
+                if loader == "vanilla":
+                    self.e_mods_lbl.setText("Mods de FPS (versão pura — nenhum se aplica):")
+                else:
+                    self.e_mods_lbl.setText(f"Mods de FPS ({n_ok} compatíveis com {mc} {loader}):")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _apply_modsup_from_log(self, msg: str):
+        try:
+            _, rest = msg.split("__MODSUP__:", 1)
+            loader, mc, pairs = rest.split(":", 2)
+            if self.loader.currentText() != loader or self.version.currentText().strip() != mc:
+                return  # resposta velha — o senhor já trocou de versão
+            d = dict(p.split("=") for p in pairs.split(",") if "=" in p)
+            self._apply_modsupport(loader, mc, d)
+        except Exception:
+            pass
 
     def _apply_loaders_from_log(self, msg: str):
         try:
@@ -2073,6 +2518,9 @@ class MainWindow(QMainWindow):
             cur = self._current_inst()
             if cur and cur.get("type") == "standard":
                 return (cur.get("mc", "") or "", cur.get("loader", "vanilla") or "vanilla")
+            if cur and cur.get("type") == "modpack":
+                return (cur.get("mc", "") or "",
+                        self._loader_from_launch(cur.get("launch", "")) or "")
         except Exception:
             pass
         try:
@@ -2080,32 +2528,52 @@ class MainWindow(QMainWindow):
         except Exception:
             return ("", "vanilla")
 
+    @staticmethod
+    def _loader_from_launch(launch: str) -> str:
+        """Adivinha o loader pelo id de launch (vale p/ modpacks)."""
+        try:
+            low = (launch or "").lower()
+            for cand in ("fabric", "quilt", "forge", "neoforge"):
+                if cand in low:
+                    return cand
+        except Exception:
+            pass
+        return ""
+
     def _refresh_store_target(self):
         try:
             kind = self._store_kind()
             mc, loader = self._store_mc_loader()
+            picked = ""
+            try:
+                picked = self._store_search_mc()
+            except Exception:
+                picked = ""
+            show_mc = picked or mc
             if mc and mc != getattr(self, "_last_target_mc", ""):
                 self._last_target_mc = mc
                 try:
-                    idx = self.store_mc.findData(mc)
-                    self.store_mc.blockSignals(True)
-                    if idx >= 0:
-                        self.store_mc.setCurrentIndex(idx)
-                    else:
-                        self.store_mc.setEditText(mc)
-                    self.store_mc.blockSignals(False)
+                    # Só espelha a versão de ▶ Jogar se o senhor ainda não escolheu outra no filtro.
+                    if not picked:
+                        idx = self.store_mc.findData(mc)
+                        self.store_mc.blockSignals(True)
+                        if idx >= 0:
+                            self.store_mc.setCurrentIndex(idx)
+                        else:
+                            self.store_mc.setEditText(mc)
+                        self.store_mc.blockSignals(False)
                 except Exception:
                     pass
-            fmc = mc
+            fmc = show_mc
             onde = f" (para {fmc})" if fmc else ""
             if kind == "modpack":
                 self.store_target.setText("Modpacks viram uma versão sua ao instalar." + onde)
             elif kind == "mod":
-                aviso = "" if loader in ("fabric", "quilt") else " (use uma versão Fabric/Quilt — veja 🗂 Versões)"
-                self.store_target.setText(f"Mods para: {mc or '?'} • {loader}{aviso}{onde}")
+                aviso = "" if loader in ("fabric", "quilt", "forge", "neoforge") else " (use uma versão com loader — veja 🗂 Versões)"
+                self.store_target.setText(f"Mods para: {show_mc or '?'} • {loader}{aviso}{onde}")
             else:
                 nome = {"resourcepack": "Texturas", "shader": "Shaders"}.get(kind, kind)
-                self.store_target.setText(f"{nome} para: Minecraft {mc or '?'}{onde}")
+                self.store_target.setText(f"{nome} para: Minecraft {show_mc or '?'}{onde}")
         except Exception:
             pass
 
@@ -2125,16 +2593,20 @@ class MainWindow(QMainWindow):
     def _mp_do_search(self):
         q = self.mp_search.text().strip()
         kind = self._store_kind()
-        # Busca sempre travada na MC da instalação atual: impede ver/baixar
-        # coisa de outra versão por engano (o filtro da loja é só exibição).
+        # O filtro da loja manda na busca; vazio = segue a versão de ▶ Jogar.
         mc, loader = self._store_mc_loader()
+        try:
+            picked = self._store_search_mc()
+        except Exception:
+            picked = ""
+        search_mc = picked or mc
         loaders: list[str] | None = None
         if kind == "mod" and loader in ("fabric", "quilt", "forge", "neoforge"):
             loaders = [loader]
         self.b_mp_search.setEnabled(False)
-        self.mp_status.setText(f"buscando para {mc or '…'}…")
+        self.mp_status.setText(f"buscando para {search_mc or '…'}…")
 
-        def work(query=q, kind=kind, mc=mc, loaders=loaders):
+        def work(query=q, kind=kind, mc=search_mc, loaders=loaders):
             try:
                 hits = search_projects(query, kind, 12, loaders=loaders, game_version=mc)
                 self._mp_hits = hits
@@ -2250,19 +2722,25 @@ class MainWindow(QMainWindow):
 
     def _install_store_file(self, slug: str, kind: str):
         cur = self._current_inst()
-        if not cur or cur.get("type") != "standard":
-            QMessageBox.warning(self, APP_NAME, "Escolha uma versão normal em ▶ Jogar primeiro.\n(Modpacks cuidam do próprio conteúdo.)")
+        if not cur:
+            QMessageBox.warning(self, APP_NAME, "Escolha uma versão em ▶ Jogar primeiro.")
             self.pages.setCurrentIndex(0)
             return
+        is_mp = cur.get("type") == "modpack"
         mc, loader = self._store_mc_loader()
         nomes = {"mod": "mod", "resourcepack": "textura", "shader": "shader"}
         if not mc:
             QMessageBox.warning(self, APP_NAME, "A lista do Minecraft ainda está carregando. Aguarde.")
             return
-        if kind == "mod" and loader not in ("fabric", "quilt"):
-            QMessageBox.warning(
-                self, APP_NAME,
-                "Mods precisam de uma versão Fabric ou Quilt.\nCrie uma em 🗂 Versões.")
+        if kind == "mod" and loader not in ("fabric", "quilt", "forge", "neoforge"):
+            if is_mp:
+                QMessageBox.warning(
+                    self, APP_NAME,
+                    "Não identifiquei o loader deste modpack.\nMods manuais vão para 🗂 Versões normais.")
+            else:
+                QMessageBox.warning(
+                    self, APP_NAME,
+                    "Mods precisam de uma versão com loader (Fabric, Quilt, Forge ou NeoForge).\nCrie uma em 🗂 Versões.")
             self.pages.setCurrentIndex(1)
             return
         title = slug
@@ -2333,9 +2811,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Escolha uma versão normal em ▶ Jogar.")
             return
         mc, loader = self._store_mc_loader()
-        if not mc or loader not in ("fabric", "quilt"):
+        if not mc or loader not in ("fabric", "quilt", "forge", "neoforge"):
             QMessageBox.information(
-                self, APP_NAME, "Updates valem para versões Fabric/Quilt com MC conhecida.")
+                self, APP_NAME, "Updates valem para versões com loader e MC conhecida.")
             return
         self.b_check_updates.setEnabled(False)
         self.b_update_all.setEnabled(False)
@@ -2713,8 +3191,29 @@ class MainWindow(QMainWindow):
                                 s.log.emit(f"☕ Java {_jm(ver)} para {ver}: {_j}")
                         except Exception:
                             pass
-                        if mods_sel and loader in ("fabric", "quilt"):
+                        # Aviso honesto p/ MC antiga no Wayland (LWJGL2 trava sem X11/xrandr).
+                        try:
+                            import os as _os
+                            import shutil as _sh
+                            _parts = [int(p) for p in str(ver).split(".") if p.isdigit()]
+                            _old = len(_parts) >= 2 and _parts[0] == 1 and _parts[1] <= 12
+                            if _old:
+                                if not _sh.which("xrandr"):
+                                    s.log.emit("⚠ MC ≤1.12 usa motor gráfico antigo (LWJGL2): instale o xrandr — `sudo pacman -S xorg-xrandr` — e se travar, jogue numa sessão X11 (Xorg) em vez de Wayland.")
+                                elif (_os.environ.get("WAYLAND_DISPLAY") or "") and not (_os.environ.get("DISPLAY") or ""):
+                                    s.log.emit("⚠ MC ≤1.12 no Wayland puro trava (tela preta/crash). Se falhar, entre numa sessão X11 no login.")
+                        except Exception:
+                            pass
+                        if mods_sel and loader in ("fabric", "quilt", "forge", "neoforge"):
                             try:
+                                # Save antigo de Forge sem as chaves do pack: completa com o padrão.
+                                if loader == "forge":
+                                    try:
+                                        from .modrinth import FORGE_PERF_MODS as _fpm
+                                        for _k in _fpm:
+                                            mods_sel.setdefault(_k, True)
+                                    except Exception:
+                                        pass
                                 mods_dir = gdir / "mods"
                                 mods_dir.mkdir(parents=True, exist_ok=True)
                                 n = ensure_mods(ver, loader, mods_sel, mods_dir,
@@ -2737,7 +3236,7 @@ class MainWindow(QMainWindow):
                                         got += 1 if dest.name else 0
                                         continue
                                     if ck == "mod":
-                                        if loader not in ("fabric", "quilt"):
+                                        if loader not in ("fabric", "quilt", "forge", "neoforge"):
                                             continue
                                         lds = [loader]
                                     elif ck == "resourcepack":
@@ -2783,8 +3282,14 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
                 s.log.emit("🚀 Iniciando o jogo…")
+                try:
+                    _gpu_env = self._gpu_env_extra()
+                except Exception:
+                    _gpu_env = {}
+                if _gpu_env:
+                    s.log.emit("🎮 Placa dedicada (NVIDIA) ativada p/ esta sessão.")
                 p = launch(real_ver, options, ram, server=srv_host, port=srv_port,
-                           game_dir=str(gdir))
+                           game_dir=str(gdir), env_extra=_gpu_env or None)
                 s.status.emit(f"rodando (pid {p.pid}) — bom jogo!")
                 s.log.emit(f"✓ Jogo rodando (pid {p.pid}). Pode minimizar o launcher.")
                 try:
@@ -2801,13 +3306,25 @@ class MainWindow(QMainWindow):
                 s.status.emit("erro — veja o console acima")
         threading.Thread(target=work, daemon=True).start()
 
-    def _play_offline(self):
+    def _play_local(self):
         nick = self.user.text().strip() or "Salsicha"
         if not (3 <= len(nick) <= 16):
             QMessageBox.warning(self, APP_NAME, "Nick com 3–16 letras, senhor.")
             return
-        self._log(f"Modo offline como {nick} (mundos locais e servidores offline).")
+        try:
+            save_local_account(nick)
+        except Exception:
+            pass
+        try:
+            self._refresh_local_accounts()
+        except Exception:
+            pass
+        self._log(f"Conta Local {nick} (sem Microsoft: mundos locais e servidores offline).")
         self._run_game(offline_options(nick))
+
+    def _play_offline(self):
+        """Alias antigo — agora é Conta Local."""
+        return self._play_local()
 
     def _play_microsoft(self):
         accs = load_accounts()

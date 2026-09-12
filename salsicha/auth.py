@@ -9,8 +9,43 @@ import minecraft_launcher_lib
 
 CONFIG_DIR = Path.home() / ".salsicha-launcher"
 ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"
+LOCAL_ACCOUNTS_FILE = CONFIG_DIR / "local_accounts.json"
 
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_local_accounts() -> dict:
+    """Contas locais (sem Microsoft): {nick: {name, uuid, created}}."""
+    if not LOCAL_ACCOUNTS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(LOCAL_ACCOUNTS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_local_account(username: str) -> dict:
+    """Cria (ou confirma) a conta local e retorna a entrada salva."""
+    username = (username or "").strip()
+    accounts = load_local_accounts()
+    if username in accounts and isinstance(accounts[username], dict):
+        return accounts[username]
+    import time as _t
+    entry = {"name": username, "uuid": get_offline_uuid(username),
+             "created": int(_t.time()), "_type": "local"}
+    accounts[username] = entry
+    LOCAL_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
+    return entry
+
+
+def remove_local_account(username: str) -> None:
+    accounts = load_local_accounts()
+    if username in accounts:
+        del accounts[username]
+        LOCAL_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2, ensure_ascii=False),
+                                       encoding="utf-8")
 
 
 def get_offline_uuid(username: str) -> str:

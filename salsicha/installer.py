@@ -78,11 +78,16 @@ def build_command(version: str, options: dict, ram_gb: int = 4,
 
 def launch(version: str, options: dict, ram_gb: int = 4,
            server: str | None = None, port: int | None = None,
-           game_dir: str | None = None) -> subprocess.Popen:
+           game_dir: str | None = None,
+           env_extra: dict | None = None) -> subprocess.Popen:
     import datetime
+    import os
     from pathlib import Path
 
     cmd = build_command(version, options, ram_gb, server, port, game_dir)
+    env = dict(os.environ)
+    if env_extra:
+        env.update({k: str(v) for k, v in env_extra.items()})
     logdir = Path.home() / ".salsicha-launcher" / "logs"
     try:
         logdir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +96,6 @@ def launch(version: str, options: dict, ram_gb: int = 4,
     except Exception:
         logf = None  # type: ignore[assignment]
     if logf is None:
-        return subprocess.Popen(cmd, cwd=game_dir or get_minecraft_dir())
+        return subprocess.Popen(cmd, cwd=game_dir or get_minecraft_dir(), env=env)
     return subprocess.Popen(cmd, cwd=game_dir or get_minecraft_dir(),
-                            stdout=logf, stderr=subprocess.STDOUT)
+                            stdout=logf, stderr=subprocess.STDOUT, env=env)

@@ -18,6 +18,25 @@ PERF_MODS: dict[str, tuple[str, str]] = {
     "fabric-api": ("Fabric API", "Obrigatório p/ a maioria dos mods Fabric"),
 }
 
+# Pack de otimização para Forge (1.12.2 e afins — testado no Modrinth).
+# Sodium/Lithium/Iris não existem p/ Forge 1.12.2; estes sim.
+FORGE_PERF_MODS: dict[str, tuple[str, str]] = {
+    "foamfix": ("FoamFix", "Menos RAM e loading mais rápido (o essencial da 1.12.2)"),
+    "vanillafix": ("VanillaFix", "Corrige crashes e melhora o desempenho vanilla"),
+    "texfix": ("TexFix", "Otimiza texturas e o uso de memória"),
+    "surge": ("Surge", "Acelera loading e recarregamentos"),
+    "clumps": ("Clumps", "Agrupa orbes de XP — menos lag"),
+}
+
+SUPPORTED_LOADERS = ("fabric", "quilt", "forge", "neoforge")
+
+
+def perf_mods_for(loader: str) -> dict[str, tuple[str, str]]:
+    """Pack certo p/ cada loader. Forge usa o pack legado; resto usa o moderno."""
+    if (loader or "vanilla") == "forge":
+        return FORGE_PERF_MODS
+    return PERF_MODS
+
 
 def _get(url: str, params: dict | None = None, timeout: int = 20):
     r = requests.get(url, params=params, headers=UA, timeout=timeout)
@@ -53,6 +72,26 @@ def latest_compat_file(slug: str, mc_version: str, loaders: list[str] | tuple[st
     return None
 
 
+def compat_status(slug: str, mc_version: str,
+                  loaders: list[str] | tuple[str, ...] = ("fabric",)) -> bool | None:
+    """True se há build p/ (mc, loaders); False se não há; None se offline/erro."""
+    try:
+        params: dict = {"limit": 5}
+        if mc_version:
+            params["game_versions"] = f'["{mc_version}"]'
+        if loaders:
+            params["loaders"] = json.dumps(list(loaders))
+        data = _get(f"{API}/project/{slug}/version", params)
+    except Exception:
+        return None
+    for v in data:
+        files = v.get("files") or []
+        prim = [f for f in files if f.get("primary")] or files
+        if prim:
+            return True
+    return False
+
+
 def supported_versions(slug: str, limit: int = 10) -> list[str]:
     """Últimas game_versions suportadas pelo projeto (para mensagem de erro)."""
     try:
@@ -78,7 +117,7 @@ def reconcile_mods_for_launch(selection: dict[str, bool], store_files: list[str]
         mods_dir.mkdir(parents=True, exist_ok=True)
         disabled = mods_dir / ".salsicha-disabled"
         disabled.mkdir(parents=True, exist_ok=True)
-        if loader not in ("fabric", "quilt"):
+        if loader == "vanilla" or not loader:
             moved = 0
             for f in mods_dir.glob("*.jar"):
                 try:
@@ -151,12 +190,18 @@ def download_url_to(url: str, dest: Path, log=lambda m: None) -> bool:
 def ensure_mods(mc_version: str, loader: str, selection: dict[str, bool],
                mods_dir: Path, log=lambda m: None) -> int:
     """Baixa os mods marcados. Retorna quantos instalados/atualizados."""
-    if loader not in ("fabric", "quilt"):
-        log("ℹ Mods automáticos só para Fabric/Quilt nesta versão.")
+    if loader not in SUPPORTED_LOADERS:
+        log("ℹ Mods automáticos valem para Fabric/Quilt/Forge/NeoForge nesta versão.")
         return 0
+    # Forge tem pack próprio; ignora chaves do pack Fabric que sobraram no save.
+    want_pack = perf_mods_for(loader)
     mods_dir.mkdir(parents=True, exist_ok=True)
     done = 0
     for slug, want in selection.items():
+        if slug not in want_pack and slug != "fabric-api":
+            continue
+        if loader == "forge" and slug == "fabric-api":
+            continue
         target = mods_dir / f"{slug}.jar"  # marcador; nome real varia
         if not want:
             # remove versões antigas desse mod
