@@ -49,12 +49,9 @@ def latest_file_url(slug: str, mc_version: str, loader: str = "fabric") -> tuple
     return latest_compat_file(slug, mc_version, [loader])
 
 
-def latest_compat_file(slug: str, mc_version: str, loaders: list[str] | tuple[str, ...] = ("fabric",)) -> tuple[str, str] | None:
-    """Igual ao acima, mas com lista de loaders.
-
-    loaders vazia/None = qualquer loader (uso para shaders: iris/optifine/etc).
-    resourcepacks usam ["minecraft"], mods usam [loader] (fabric/quilt/forge...).
-    """
+def latest_compat_version(slug: str, mc_version: str,
+                          loaders: list[str] | tuple[str, ...] = ("fabric",)) -> dict | None:
+    """Versão mais nova com arquivo compatível (traz as dependências)."""
     try:
         params: dict = {"limit": 5}
         if mc_version:
@@ -68,7 +65,100 @@ def latest_compat_file(slug: str, mc_version: str, loaders: list[str] | tuple[st
         files = v.get("files") or []
         prim = [f for f in files if f.get("primary")] or files
         if prim:
-            return prim[0]["filename"], prim[0]["url"]
+            return v
+    return None
+
+
+def project_slug(project_id: str) -> str | None:
+    """slug a partir do id de projeto (dependências vêm como id)."""
+    try:
+        return _get(f"{API}/project/{project_id}").get("slug")
+    except Exception:
+        return None
+
+
+# slug -> prefixos de arquivo (o jar nem sempre começa com o slug, ex.: yacl)
+DEP_FILENAME_PREFIXES: dict[str, tuple[str, ...]] = {
+    "yacl": ("yet_another_config_lib", "yacl"),
+    "fabric-language-kotlin": ("fabric-language-kotlin",),
+    "fabric-api": ("fabric-api",),
+}
+
+
+def dep_prefixes(slug: str) -> tuple[str, ...]:
+    """Prefixos para achar (e limpar) builds antigas da mesma lib."""
+    try:
+        return DEP_FILENAME_PREFIXES.get(slug, (slug,))
+    except Exception:
+        return (slug,)
+
+
+def resolve_required_deps(slug: str, mc_version: str,
+                          loaders: list[str] | tuple[str, ...],
+                          _depth: int = 0,
+                          _seen: set | None = None) -> tuple[list, list]:
+    """(encontradas, sem_build) das dependências required, recursivo.
+
+    encontradas: [(slug, filename, url)]. Sem repetidos, sem loop.
+    """
+    if _seen is None:
+        _seen = set()
+    found: list = []
+    missing: list = []
+    if _depth > 2 or slug in _seen:
+        return found, missing
+    _seen.add(slug)
+    try:
+        ver = latest_compat_version(slug, mc_version, loaders)
+    except Exception:
+        return found, missing
+    if not ver:
+        return found, missing
+    for dep in ver.get("dependencies") or []:
+        if dep.get("dependency_type") != "required":
+            continue
+        pid = dep.get("project_id")
+        if not pid:
+            continue
+        try:
+            dslug = project_slug(pid)
+        except Exception:
+            dslug = None
+        if not dslug or dslug in _seen:
+            continue
+        _seen.add(dslug)
+        try:
+            dv = latest_compat_version(dslug, mc_version, loaders)
+        except Exception:
+            dv = None
+        if not dv:
+            missing.append(dslug)
+            continue
+        files = dv.get("files") or []
+        prim = [f for f in files if f.get("primary")] or files
+        if not prim:
+            missing.append(dslug)
+            continue
+        found.append((dslug, prim[0]["filename"], prim[0]["url"]))
+        sub_f, sub_m = resolve_required_deps(dslug, mc_version, loaders, _depth + 1, _seen)
+        found += sub_f
+        missing += sub_m
+    return found, missing
+
+
+def latest_compat_file(slug: str, mc_version: str, loaders: list[str] | tuple[str, ...] = ("fabric",)) -> tuple[str, str] | None:
+    """Igual ao acima, mas com lista de loaders.
+
+    loaders vazia/None = qualquer loader (uso para shaders: iris/optifine/etc).
+    resourcepacks usam ["minecraft"], mods usam [loader] (fabric/quilt/forge...).
+    """
+    v = latest_compat_version(slug, mc_version, loaders)
+    if not v:
+        return None
+    files = v.get("files") or []
+    prim = [f for f in files if f.get("primary")] or files
+    if prim:
+        return prim[0]["filename"], prim[0]["url"]
     return None
 
 

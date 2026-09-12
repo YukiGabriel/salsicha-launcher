@@ -2797,6 +2797,34 @@ class MainWindow(QMainWindow):
                     if not download_url_to(url, dest, log=lambda m: s.log.emit(str(m))):
                         return
                     s.log.emit(f"✓ {nomes[kind]} instalado: {fname}")
+                if kind == "mod":
+                    try:  # dependências required (ex.: Zoomify pede Kotlin + YACL)
+                        from .modrinth import resolve_required_deps as _reqs
+                        _deps, _missing = _reqs(slug, mc, loaders)
+                        for dslug, dfname, durl in _deps:
+                            ddest = dest.parent / dfname
+                            try:  # limpa builds antigas da mesma lib
+                                from .modrinth import dep_prefixes as _pfxs
+                                for _pfx in _pfxs(dslug):
+                                    for _old in dest.parent.glob(f"{_pfx}*.jar"):
+                                        if _old != ddest:
+                                            try:
+                                                _old.unlink()
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
+                            if ddest.exists():
+                                s.log.emit(f"✓ dependência já instalada: {dfname}")
+                            elif _dl(durl, ddest, log=lambda m: s.log.emit(str(m))):
+                                s.log.emit(f"✓ dependência instalada: {dfname}")
+                            else:
+                                continue
+                            s.log.emit(f"__CONTENT_ADDED__:{inst_id}:mod:{dslug}:{dfname}:{dslug}")
+                        if _missing:
+                            s.log.emit(f"⚠ sem build para {mc}: {', '.join(_missing)} (instale à mão).")
+                    except Exception as e:
+                        s.log.emit(f"ℹ dependências não verificadas: {e}")
                 s.log.emit(f"__CONTENT_ADDED__:{inst_id}:{kind}:{slug}:{fname}:{title}")
                 s.status.emit(f"{slug} pronto")
             except Exception as e:
