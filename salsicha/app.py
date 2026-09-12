@@ -3222,12 +3222,21 @@ class MainWindow(QMainWindow):
                         label += f" → {srv_host}"
                     s.status.emit(f"preparando {label}…")
                     real_ver = inst.get("launch") or ver
-                    # Java do modpack: deriva a MC do id de launch ("...-1.21") ou usa a MC base
+                    # Java do modpack: a MC da ficha manda; o id de launch
+                    # só serve de fallback (ex.: "neoforge-21.1.228" não é MC).
                     try:
                         import re as _re
-                        _m = _re.search(r"1\.\d+(?:\.\d+)?", str(real_ver))
-                        _mc_guess = _m.group(0) if _m else (ver if ver and ver != "?" else "")
-                        if _mc_guess:
+                        _mc_guess = (inst.get("mc") or "").strip()
+                        if not _mc_guess or _mc_guess == "?":
+                            _toks = _re.findall(r"\d+(?:\.\d+)+", str(real_ver))
+                            _mc_guess = ""
+                            for _t in _toks:
+                                if _t.startswith("1."):
+                                    _mc_guess = _t
+                                    break
+                            if not _mc_guess and _toks:
+                                _mc_guess = _toks[-1]
+                        if _mc_guess and _mc_guess != "?":
                             from .java_utils import get_java_for_mc as _gj, required_java_major as _jm2
                             _j2 = _gj(_mc_guess)
                             if _j2:
