@@ -2343,13 +2343,10 @@ class MainWindow(QMainWindow):
             self._apply_modpacks_from_log(msg)
             return
         if msg.startswith("__MODPACK_DONE__:"):
-            try:
-                parts = msg.split("__MODPACK_DONE__:", 1)[1].split(":", 1)
-                if len(parts) != 2:
-                    return
-                slug, ver = parts
-            except ValueError:
+            parsed = self.parse_modpack_done(msg)
+            if not parsed:
                 return
+            slug, ver = parsed
             try:
                 import time as _t
                 insts = self._get_installations()
@@ -2511,6 +2508,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def parse_modpack_done(msg: str) -> tuple[str, str] | None:
+        """(slug, launch_version) do sinal de modpack pronto. None se malformado."""
+        try:
+            parts = msg.split("__MODPACK_DONE__:", 1)[1].split(":", 1)
+            if len(parts) == 2 and all(p.strip() for p in parts):
+                return parts[0].strip(), parts[1].strip()
+        except Exception:
+            pass
+        return None
+
     def _apply_modsup_from_log(self, msg: str):
         try:
             _, rest = msg.split("__MODSUP__:", 1)
@@ -2560,7 +2568,7 @@ class MainWindow(QMainWindow):
         """Adivinha o loader pelo id de launch (vale p/ modpacks)."""
         try:
             low = (launch or "").lower()
-            for cand in ("fabric", "quilt", "forge", "neoforge"):
+            for cand in ("fabric", "quilt", "neoforge", "forge"):
                 if cand in low:
                     return cand
         except Exception:
@@ -3216,6 +3224,7 @@ class MainWindow(QMainWindow):
                         gdir = ensure_instance(inst, log=lambda m: s.log.emit(str(m)))
                 except Exception:
                     gdir = Path(get_minecraft_dir())
+                need_java: int | None = None
                 if is_mp:
                     label = f"📦 {inst.get('name')}"
                     if srv_host:
@@ -3223,21 +3232,13 @@ class MainWindow(QMainWindow):
                     s.status.emit(f"preparando {label}…")
                     real_ver = inst.get("launch") or ver
                     # Java do modpack: a MC da ficha manda; o id de launch
-                    # só serve de fallback (ex.: "neoforge-21.1.228" não é MC).
+                    # só serve de fallback ("neoforge-21.1.228" não é MC).
                     try:
-                        import re as _re
-                        _mc_guess = (inst.get("mc") or "").strip()
-                        if not _mc_guess or _mc_guess == "?":
-                            _toks = _re.findall(r"\d+(?:\.\d+)+", str(real_ver))
-                            _mc_guess = ""
-                            for _t in _toks:
-                                if _t.startswith("1."):
-                                    _mc_guess = _t
-                                    break
-                            if not _mc_guess and _toks:
-                                _mc_guess = _toks[-1]
-                        if _mc_guess and _mc_guess != "?":
-                            from .java_utils import get_java_for_mc as _gj, required_java_major as _jm2
+                        from .java_utils import modpack_mc as _mmc
+                        from .java_utils import get_java_for_mc as _gj, required_java_major as _jm2
+                        _mc_guess = _mmc(inst.get("mc", ""), real_ver)
+                        if _mc_guess:
+                            need_java = _jm2(_mc_guess)
                             _j2 = _gj(_mc_guess)
                             if _j2:
                                 options["executablePath"] = _j2
@@ -3255,11 +3256,21 @@ class MainWindow(QMainWindow):
                         s.status.emit(f"preparando {label}…")
                         s.log.emit("✓ Versão pronta — indo direto, sem baixar nada.")
                         real_ver = inst_launch
+                        try:
+                            from .java_utils import get_java_for_mc as _gj3, required_java_major as _jm3b
+                            need_java = _jm3b(ver)
+                            if "executablePath" not in options:
+                                _j3 = _gj3(ver)
+                                if _j3:
+                                    options["executablePath"] = _j3
+                        except Exception:
+                            pass
                     else:
                         s.status.emit(f"preparando {label}…")
                         # Java certo para a MC (1.8→8, 26.x→21), via runtime da Mojang
                         try:
                             from .java_utils import get_java_for_mc, required_java_major as _jm
+                            need_java = _jm(ver)
                             _j = get_java_for_mc(ver)
                             if _j:
                                 options["executablePath"] = _j
@@ -3364,7 +3375,8 @@ class MainWindow(QMainWindow):
                 if _gpu_env:
                     s.log.emit("🎮 Placa dedicada (NVIDIA) ativada p/ esta sessão.")
                 p = launch(real_ver, options, ram, server=srv_host, port=srv_port,
-                           game_dir=str(gdir), env_extra=_gpu_env or None)
+                           game_dir=str(gdir), env_extra=_gpu_env or None,
+                           require_java_major=need_java)
                 s.status.emit(f"rodando (pid {p.pid}) — bom jogo!")
                 s.log.emit(f"✓ Jogo rodando (pid {p.pid}). Pode minimizar o launcher.")
                 try:

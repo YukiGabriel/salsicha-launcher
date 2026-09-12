@@ -79,12 +79,20 @@ def build_command(version: str, options: dict, ram_gb: int = 4,
 def launch(version: str, options: dict, ram_gb: int = 4,
            server: str | None = None, port: int | None = None,
            game_dir: str | None = None,
-           env_extra: dict | None = None) -> subprocess.Popen:
+           env_extra: dict | None = None,
+           require_java_major: int | None = None) -> subprocess.Popen:
     import datetime
     import os
     from pathlib import Path
 
     cmd = build_command(version, options, ram_gb, server, port, game_dir)
+    if require_java_major and options.get("executablePath"):
+        from .java_utils import java_major as _jmaj
+        got = _jmaj(options["executablePath"])
+        if got is not None and got != require_java_major:
+            raise RuntimeError(
+                f"Java {got} não serve para este jogo (precisa Java {require_java_major}). "
+                f"Binário: {options['executablePath']}")
     env = dict(os.environ)
     if env_extra:
         env.update({k: str(v) for k, v in env_extra.items()})

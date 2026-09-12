@@ -93,3 +93,38 @@ def java_version(java_path: str) -> str:
         return (out.stderr or out.stdout).splitlines()[0] if (out.stderr or out.stdout) else "?"
     except Exception as e:
         return str(e)
+
+
+def java_major(java_path: str) -> int | None:
+    """Major real do binário (8, 17, 21...). None se não der p/ descobrir."""
+    import re as _re
+    try:
+        out = subprocess.run([java_path, "-version"], capture_output=True,
+                             text=True, timeout=10)
+        txt = (out.stderr or "") + "\n" + (out.stdout or "")
+        m = _re.search(r'version "(\d+)(?:\.(\d+))?', txt)
+        if not m:
+            return None
+        major = int(m.group(1))
+        if major == 1 and m.group(2):
+            return int(m.group(2))  # "1.8.0_202" -> 8
+        return major
+    except Exception:
+        return None
+
+
+def modpack_mc(inst_mc: str, launch_id: str) -> str:
+    """MC real do modpack: a ficha manda; o id de launch só desempata.
+
+    "neoforge-21.1.228" NÃO contém a MC (21.1 é o NeoForge) — nesse caso,
+    sem MC na ficha, volta o último token e o chamador valida o Java.
+    """
+    import re as _re
+    m = (inst_mc or "").strip()
+    if m and m != "?":
+        return m
+    toks = _re.findall(r"\d+(?:\.\d+)+", str(launch_id or ""))
+    for t in toks:
+        if t.startswith("1."):
+            return t
+    return toks[-1] if toks else ""
