@@ -2621,12 +2621,15 @@ class MainWindow(QMainWindow):
         q = self.mp_search.text().strip()
         kind = self._store_kind()
         # O filtro da loja manda na busca; vazio = segue a versão de ▶ Jogar.
+        # Modpacks: sem filtro mostra tudo (cada pack traz a própria MC).
         mc, loader = self._store_mc_loader()
         try:
             picked = self._store_search_mc()
         except Exception:
             picked = ""
         search_mc = picked or mc
+        if kind == "modpack" and not picked:
+            search_mc = ""
         loaders: list[str] | None = None
         if kind == "mod" and loader in ("fabric", "quilt", "forge", "neoforge"):
             loaders = [loader]
@@ -2719,17 +2722,22 @@ class MainWindow(QMainWindow):
             s = self.signals
             try:
                 url = latest_mrpack_version_url(slug, mc)
+                eff_mc = mc
                 if not url:
+                    # Sem build p/ a MC atual: usa a MC do próprio pack, sem desistir.
                     try:
                         from .discover import mrpack_release as _rel
                         _r = _rel(slug, "")
-                        sup = ", ".join((_r.get("mc") or [])[:8]) if _r else ""
                     except Exception:
-                        sup = ""
-                    detalhe = f" Suporta: {sup}." if sup else ""
-                    s.log.emit(f"⚠ {slug}: sem .mrpack para {mc}.{detalhe}")
-                    s.status.emit(f"{slug} não suporta {mc}")
-                    return
+                        _r = None
+                    if not _r:
+                        s.log.emit(f"⚠ {slug}: não achei .mrpack.")
+                        s.status.emit(f"{slug} sem .mrpack")
+                        return
+                    url = _r["url"]
+                    eff_mc = ((_r.get("mc") or []) or [mc])[0] or mc
+                    s.log.emit(f"ℹ {slug} não tem build para {mc}; usando {eff_mc} (a do pack).")
+                self._mp_mc = eff_mc
                 cb = {
                     "setStatus": lambda t: s.log.emit("• " + str(t)),
                     "setProgress": lambda v: s.progress.emit(int(v)),
