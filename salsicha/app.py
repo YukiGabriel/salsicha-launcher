@@ -510,6 +510,17 @@ class MainWindow(QMainWindow):
         row_s.addWidget(self.e_direct)
         f2.addLayout(row_s)
 
+        row_r = QHBoxLayout()
+        row_r.addWidget(QLabel("RAM:"))
+        self.e_ram = QSpinBox()
+        self.e_ram.setRange(0, 32)
+        self.e_ram.setSpecialValueText("auto (global)")
+        self.e_ram.setSuffix(" GB")
+        self.e_ram.setToolTip("0 = usa o valor de ⚙️ Config")
+        row_r.addWidget(self.e_ram)
+        row_r.addStretch(1)
+        f2.addLayout(row_r)
+
         g3 = QGroupBox("Conteúdo desta versão (mods, texturas, shaders)")
         f3 = QVBoxLayout(g3)
         self.content_list = QListWidget()
@@ -1674,6 +1685,12 @@ class MainWindow(QMainWindow):
             nc = len(i.get("content") or [])
             if nc and i.get("type") != "modpack":
                 base += f" • {nc} extra(s)"
+            try:
+                _rg = int(i.get("ram_gb") or 0)
+            except Exception:
+                _rg = 0
+            if _rg:
+                base += f" • {_rg} GB"
             self.inst_info.setText(base)
             self._set_installations(self._get_installations(), i.get("id"))
             try:
@@ -1709,6 +1726,10 @@ class MainWindow(QMainWindow):
             idx = self.e_server.findData(srv)
             self.e_server.setCurrentIndex(idx if idx >= 0 else 0)
             self.e_direct.setChecked(bool(i.get("direct", False)))
+            try:
+                self.e_ram.setValue(int(i.get("ram_gb") or 0))
+            except Exception:
+                self.e_ram.setValue(0)
             self._refresh_content_list()
         except Exception:
             pass
@@ -1848,6 +1869,10 @@ class MainWindow(QMainWindow):
                 cb.setChecked(slug in ("sodium", "lithium", "fabric-api", "foamfix", "vanillafix", "texfix", "surge", "clumps"))
             self.e_server.setCurrentIndex(0)
             self.e_direct.setChecked(False)
+            try:
+                self.e_ram.setValue(0)
+            except Exception:
+                pass
             self.inst_list.clearSelection()
             try:
                 self.content_list.clear()
@@ -1878,6 +1903,7 @@ class MainWindow(QMainWindow):
                 "loader": self.loader.currentText() or "vanilla",
                 "loader_ver": self.loader_ver.currentText().strip(),
                 "mods": {s: cb.isChecked() for s, cb in self.e_mod_checks.items()},
+                "ram_gb": int(self.e_ram.value() or 0),
                 "server": self.e_server.currentData() or "",
                 "direct": self.e_direct.isChecked(),
             }
@@ -1885,9 +1911,10 @@ class MainWindow(QMainWindow):
                 if i.get("id") == data["id"]:
                     if i.get("type") == "modpack":
                         # Modpack não vira versão normal: preserva o pack,
-                        # atualiza só nome, ícone e servidor.
+                        # atualiza só nome, ícone, RAM e servidor.
                         i["name"] = data["name"]
                         i["icon"] = data.get("icon", i.get("icon", ""))
+                        i["ram_gb"] = data.get("ram_gb", i.get("ram_gb", 0))
                         i["server"] = data.get("server", "")
                         i["direct"] = data.get("direct", False)
                         data = i
@@ -3133,7 +3160,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Crie uma versão primeiro em 🗂 Versões.")
             self.pages.setCurrentIndex(1)
             return
-        ram = self.ram.value()
+        try:
+            ram = int(inst.get("ram_gb") or 0) or self.ram.value()
+        except Exception:
+            ram = self.ram.value()
         is_mp = inst.get("type") == "modpack"
         ver = inst.get("mc", "")
         loader = inst.get("loader", "vanilla") or "vanilla"
